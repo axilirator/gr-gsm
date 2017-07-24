@@ -25,7 +25,6 @@
 #include "config.h"
 #endif
 
-#include <sch.h>
 #include <gsm_constants.h>
 #include "clock_offset_control_impl.h"
 

@@ -28,7 +28,6 @@ list(APPEND grgsm_sources
     receiver/receiver_impl.cc
     receiver/receiver_config.cc
     receiver/viterbi_detector.cc
-    receiver/sch.c
     receiver/clock_offset_control_impl.cc
     receiver/cx_channel_hopper_impl.cc
     demapping/universal_ctrl_chans_demapper_impl.cc

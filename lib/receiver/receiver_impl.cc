@@ -38,9 +38,12 @@
 #include <boost/scoped_ptr.hpp>
 #include <grgsm/endian.h>
 
+extern "C" {
+  #include <osmocom/coding/gsm0503_coding.h>
+}
+
 #include "receiver_impl.h"
 #include "viterbi_detector.h"
-#include "sch.h"
 
 #if 0
 /* Files included for debuging */
@@ -220,8 +223,8 @@ namespace gr
     {
       std::vector<gr_complex> channel_imp_resp(CHAN_IMP_RESP_LENGTH * d_OSR);
       unsigned char burst_buf[BURST_SIZE];
-      int rc, t1, t2, t3;
       int burst_start;
+      int rc;
 
       /* Wait until we get a SCH burst */
       if (!reach_sch_burst(noutput_items))
@@ -233,8 +236,31 @@ namespace gr
       /* Detect bits using MLSE detection */
       detect_burst(input, &channel_imp_resp[0], burst_start, burst_buf);
 
+      /**
+       * Obtain payload from burst, where:
+       * 3  bits - tail bits
+       * 39 bits - 1/2 of payload
+       * 61 bits - synchronization sequence
+       * 39 bits - 2/2 of payload
+       * 3  bits - tail bits
+       *
+       * And emulate software bits (-127..127)
+       */
+      sbit_t payload[2 * 39];
+      uint8_t sb_info[4];
+
+      for (int i = 0; i < 39; i++) {
+        /* 1/2 */
+        payload[i] = burst_buf[i + 3] ?
+          -127 : 127;
+
+        /* 2/2 */
+        payload[i + 39] = burst_buf[i + 3 + 39 + 64] ?
+          -127 : 127;
+      }
+
       /* Attempt to decode BSIC and frame number */
-      rc = decode_sch(&burst_buf[3], &t1, &t2, &t3, &d_ncc, &d_bcc);
+      rc = gsm0503_sch_decode(sb_info, payload);
       if (rc) {
         /**
          * There is error in the SCH burst,
@@ -244,9 +270,33 @@ namespace gr
         return;
       }
 
+      /* TS 05.02 Chapter 3.3.2.2.1 SCH Frame Numbers */
+      uint8_t t3p, t2, t3;
+      uint16_t t1;
+      uint32_t sb;
+
+      sb = (sb_info[3] << 24)
+         | (sb_info[2] << 16)
+         | (sb_info[1] << 8)
+         | sb_info[0];
+
+      t1 = ((sb >> 23) & 0x01)
+               | ((sb >> 7) & 0x1fe)
+               | ((sb << 9) & 0x600);
+
+      t2 = (sb >> 18) & 0x1f;
+
+      t3p = ((sb >> 24) & 0x01) | ((sb >> 15) & 0x06);
+      t3 = t3p * 10 + 1;
+
       /* Set counter of bursts value */
       d_burst_nr.set(t1, t2, t3, 0);
       d_burst_nr++;
+
+      /* Update BSIC (NCC & BCC) */
+      uint8_t bsic = (sb >> 2) & 0x3f;
+      d_ncc = bsic >> 3;
+      d_bcc = bsic & 7;
 
       /* Consume samples up to the next guard period */
       consume_each(burst_start + BURST_SIZE * d_OSR + 4 * d_OSR);
@@ -321,8 +371,8 @@ namespace gr
 
         case sch_burst:
         {
-          int d_ncc, d_bcc;
-          int t1, t2, t3;
+          sbit_t payload[2 * 39];
+          uint8_t sb_info[4];
           int rc;
 
           /* Get channel impulse response */
@@ -337,8 +387,28 @@ namespace gr
           send_burst(d_burst_nr, output_binary,
             GSMTAP_BURST_SCH, input_nr);
 
+          /**
+           * Obtain payload from burst, where:
+           * 3  bits - tail bits
+           * 39 bits - 1/2 of payload
+           * 61 bits - synchronization sequence
+           * 39 bits - 2/2 of payload
+           * 3  bits - tail bits
+           *
+           * And emulate software bits (-127..127)
+           */
+          for (int i = 0; i < 39; i++) {
+            /* 1/2 */
+            payload[i] = output_binary[i + 3] ?
+              -127 : 127;
+
+            /* 2/2 */
+            payload[i + 39] = output_binary[i + 3 + 39 + 64] ?
+              -127 : 127;
+          }
+
           /* Attempt to decode SCH burst */
-          rc = decode_sch(&output_binary[3], &t1, &t2, &t3, &d_ncc, &d_bcc);
+          rc = gsm0503_sch_decode(sb_info, payload);
           if (rc) {
             if (++d_failed_sch >= MAX_SCH_ERRORS) {
               /* We have to resynchronize, change state */

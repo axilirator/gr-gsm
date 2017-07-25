@@ -1,7 +1,7 @@
 /* -*- c++ -*- */
 /*
  * @file
- * @author Piotr Krysik <ptrkrysik@gmail.com>
+ * @author Vadim Yanitskiy <axilirator@gmail.com>
  * @section LICENSE
  *
  * Gr-gsm is free software; you can redistribute it and/or modify
@@ -28,11 +28,10 @@
 #include <grgsm/gsmtap.h>
 #include "control_channels_decoder_impl.h"
 
-#define DATA_BYTES 23
-
 namespace gr {
   namespace gsm {
 
+    /* The public constructor */
     control_channels_decoder::sptr
     control_channels_decoder::make()
     {
@@ -40,115 +39,95 @@ namespace gr {
         (new control_channels_decoder_impl());
     }
 
-    /*
-     * Constructor
-     */
-    control_channels_decoder_impl::control_channels_decoder_impl()
-      : gr::block("control_channels_decoder",
-              gr::io_signature::make(0, 0, 0),
-              gr::io_signature::make(0, 0, 0)),
-              d_collected_bursts_num(0)
+    /* The private constructor */
+    control_channels_decoder_impl::control_channels_decoder_impl(void)
+    : gr::block("control_channels_decoder",
+        gr::io_signature::make(0, 0, 0),
+        gr::io_signature::make(0, 0, 0)),
+      d_burst_cnt(0)
     {
-        //initialize de/interleaver
-        int j, k, B;
-        for (k = 0; k < CONV_SIZE; k++)
-        {
-            B = k % 4;
-            j = 2 * ((49 * k) % 57) + ((k % 8) / 4);
-            interleave_trans[k] = B * 114 + j; //114=57 + 57
-        }
-        
-        //initialize decoder
-        FC_init(&fc_ctx, 40, 184);
-        
-        //setup input/output ports
-        message_port_register_in(pmt::mp("bursts"));
-        set_msg_handler(pmt::mp("bursts"), boost::bind(&control_channels_decoder_impl::decode, this, _1));
-        message_port_register_out(pmt::mp("msgs"));
+      /* Register IN / OUT ports */
+      message_port_register_in(pmt::mp("bursts"));
+      message_port_register_out(pmt::mp("msgs"));
+
+      /* Setup input handler */
+      set_msg_handler(pmt::mp("bursts"),
+        boost::bind(&control_channels_decoder_impl::collect, this, _1));
     }
 
-    control_channels_decoder_impl::~control_channels_decoder_impl()
+    control_channels_decoder_impl::~control_channels_decoder_impl(void)
     {
+      /* Do nothing */
     }
 
-    void control_channels_decoder_impl::decode(pmt::pmt_t msg)
+    void
+    control_channels_decoder_impl::collect(pmt::pmt_t msg)
     {
-        unsigned char iBLOCK[BLOCKS*iBLOCK_SIZE], hl, hn, conv_data[CONV_SIZE], decoded_data[PARITY_OUTPUT_SIZE];
-        d_bursts[d_collected_bursts_num] = msg;
-        d_collected_bursts_num++;
-        //get convecutive bursts
-        
-        if(d_collected_bursts_num==4)
-        {
-            d_collected_bursts_num=0;
-            //reorganize data
-            for(int ii = 0; ii < 4; ii++)
-            {
-                pmt::pmt_t header_plus_burst = pmt::cdr(d_bursts[ii]);
-                int8_t * burst_bits = (int8_t *)(pmt::blob_data(header_plus_burst))+sizeof(gsmtap_hdr);
+      pmt::pmt_t blob = pmt::cdr(msg);
 
-                for(int jj = 0; jj < 57; jj++)
-                {
-                    iBLOCK[ii*iBLOCK_SIZE+jj] = burst_bits[jj + 3];
-                    iBLOCK[ii*iBLOCK_SIZE+jj+57] = burst_bits[jj + 88]; //88 = 3+57+1+26+1
-                }
-            }
-            //deinterleave
-            for (int k = 0; k < CONV_SIZE; k++)
-            {
-                conv_data[k] = iBLOCK[interleave_trans[k]];
-            }
-            //convolutional code decode
-            int errors = conv_decode(decoded_data, conv_data);
-            //std::cout << "Errors:" << errors << " " << parity_check(decoded_data) << std::endl;
-            // check parity
-            // If parity check error detected try to fix it.
+      /* Extract bits {0..1} from message */
+      uint8_t *burst = (uint8_t *)
+        (pmt::blob_data(blob)) + sizeof(gsmtap_hdr);
 
-            if (parity_check(decoded_data))
-            {
-                FC_init(&fc_ctx, 40, 184);
-                unsigned char crc_result[PARITY_OUTPUT_SIZE];
-                if (FC_check_crc(&fc_ctx, decoded_data, crc_result) == 0)
-                {
-                    //("error: sacch: parity error (errors=%d fn=%d)\n", errors, ctx->fn);
-                    //std::cout << "Uncorrectable errors!" << std::endl;
-                    errors = -1;
-                    return;
-                } else {
-                    //DEBUGF("Successfully corrected parity bits! (errors=%d fn=%d)\n", errors, ctx->fn);
-                    //std::cout << "Corrected some errors" << std::endl;
-                    memcpy(decoded_data, crc_result, PARITY_OUTPUT_SIZE);
-                    errors = 0;
-                }
-            } else {
-                //std::cout << "Everything correct" << std::endl;
-            }
-           //compress bits
-           unsigned char outmsg[28];
-           unsigned char sbuf_len=224;
-           int i, j, c, pos=0;
-           for(i = 0; i < sbuf_len; i += 8) {
-                for(j = 0, c = 0; (j < 8) && (i + j < sbuf_len); j++){
-                    c |= (!!decoded_data[i + j]) << j;
-                }
-                outmsg[pos++] = c & 0xff;
-           }
+      /**
+       * Copy burst to buffer of 4 bursts,
+       * and convert to sbits by the way
+       */
+      for (int i = 0; i < 58; i++) {
+        int offset = d_burst_cnt * GSM_BURST_PL_LEN;
+        d_burst_buf[offset + i] = burst[i + 3] ? -127 : 127;
+        d_burst_buf[offset + 58 + i] = burst[i + 87] ? -127 : 127;
+      }
 
-           //send message with header of the first burst
-            pmt::pmt_t first_header_plus_burst = pmt::cdr(d_bursts[0]);
-            gsmtap_hdr * header = (gsmtap_hdr *)pmt::blob_data(first_header_plus_burst);
-            int8_t header_plus_data[sizeof(gsmtap_hdr)+DATA_BYTES];
-            memcpy(header_plus_data, header, sizeof(gsmtap_hdr));
-            memcpy(header_plus_data+sizeof(gsmtap_hdr), outmsg, DATA_BYTES);
-            ((gsmtap_hdr*)header_plus_data)->type = GSMTAP_TYPE_UM;
-            
-            pmt::pmt_t msg_binary_blob = pmt::make_blob(header_plus_data,DATA_BYTES+sizeof(gsmtap_hdr));
-            pmt::pmt_t msg_out = pmt::cons(pmt::PMT_NIL, msg_binary_blob);
-            
-            message_port_pub(pmt::mp("msgs"), msg_out);
-        }
-        return;
+      /* Increase burst counter */
+      d_burst_cnt++;
+
+      /* Store GSMTAP header of first burst */
+      if (d_burst_cnt == 1)
+        d_header = (gsmtap_hdr *) pmt::blob_data(blob);
+
+      /* If we have all 4/4 bursts collected */
+      if (d_burst_cnt == 4) {
+        /* Flush counter */
+        d_burst_cnt = 0;
+
+        /* Attempt to decode bursts */
+        decode();
+      }
     }
-  } /* namespace gsm */
-} /* namespace gr */
 
+    int
+    control_channels_decoder_impl::decode(void)
+    {
+      uint8_t l2_msg[GSM_MACBLOCK_LEN];
+      int n_errors, n_bits_total, rc;
+
+      /* Attempt to decode stored bursts */
+      rc = gsm0503_xcch_decode(l2_msg, d_burst_buf,
+        &n_errors, &n_bits_total);
+      if (rc)
+        return rc;
+
+      /* Compose a new message */
+      uint8_t msg[sizeof(gsmtap_hdr) + GSM_MACBLOCK_LEN];
+
+      /* Fill in stored GSMTAP header and the payload */
+      memcpy(msg, d_header, sizeof(gsmtap_hdr));
+      memcpy(msg + sizeof(gsmtap_hdr), l2_msg, GSM_MACBLOCK_LEN);
+
+      /* Change payload type in header */
+      ((gsmtap_hdr*) msg)->type = GSMTAP_TYPE_UM;
+
+      /* Create a pmt blob */
+      pmt::pmt_t blob = pmt::make_blob(msg,
+        sizeof(gsmtap_hdr) + GSM_MACBLOCK_LEN);
+      pmt::pmt_t msg_out = pmt::cons(pmt::PMT_NIL, blob);
+
+      /* Send to output */
+      message_port_pub(pmt::mp("msgs"), msg_out);
+
+      return 0;
+    }
+
+  }
+}

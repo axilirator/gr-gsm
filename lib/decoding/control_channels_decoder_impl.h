@@ -1,7 +1,7 @@
 /* -*- c++ -*- */
 /*
  * @file
- * @author Piotr Krysik <ptrkrysik@gmail.com>
+ * @author Vadim Yanitskiy <axilirator@gmail.com>
  * @section LICENSE
  *
  * Gr-gsm is free software; you can redistribute it and/or modify
@@ -24,27 +24,38 @@
 #define INCLUDED_GSM_CONTROL_CHANNELS_DECODER_IMPL_H
 
 #include <grgsm/decoding/control_channels_decoder.h>
-#include "fire_crc.h"
-#include "cch.h"
+
+extern "C" {
+  #include <osmocom/coding/gsm0503_coding.h>
+  #include <osmocom/core/bits.h>
+}
+
+#define GSM_BURST_PL_LEN    116
+#define GSM_MACBLOCK_LEN    23
 
 namespace gr {
   namespace gsm {
 
     class control_channels_decoder_impl : public control_channels_decoder
     {
-     private:
-      unsigned int d_collected_bursts_num;
-      pmt::pmt_t d_bursts[4];
-      unsigned short interleave_trans[CONV_SIZE];      
-      FC_CTX fc_ctx;      
-      void decode(pmt::pmt_t msg);
-     public:
-      control_channels_decoder_impl();
-      ~control_channels_decoder_impl();
+    private:
+      /* Burst count (N/4) */
+      uint8_t d_burst_cnt;
+      /* Burst buffer */
+      sbit_t d_burst_buf[GSM_BURST_PL_LEN * 4];
+      /* GSMTAP header of first burst from sequence */
+      struct gsmtap_hdr *d_header;
+
+      /* Performs GSM 05.03 decoding using libosmocoding */
+      int decode(void);
+
+    public:
+      control_channels_decoder_impl(void);
+      ~control_channels_decoder_impl(void);
+      void collect(pmt::pmt_t msg);
     };
 
-  } // namespace gsm
-} // namespace gr
+  }
+}
 
-#endif /* INCLUDED_GSM_CONTROL_CHANNELS_DECODER_IMPL_H */
-
+#endif
